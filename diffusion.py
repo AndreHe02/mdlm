@@ -454,9 +454,35 @@ class Diffusion(L.LightningModule):
         )
 
         L_vb = L_vb_masked * (xt == self.mask_index)
+
+        ps_x = (
+            (term_1_log_dr - term_1_log_nr).exp() * (alpha_s - alpha_t) / (1 - alpha_t)
+        )
+        ps_m = (term_2_log_dr - term_2_log_nr).exp() * (1 - alpha_s) / (1 - alpha_t)
+        ps_x = ps_x * (xt == self.mask_index)
+        ps_m = ps_m * (xt == self.mask_index)
+        weight = (xt == self.mask_index).sum()
+
+        print("ps_x", ps_x.sum() / weight)
+        print("qs_x", (alpha_s - alpha_t) / (1 - alpha_t))
+        print("ps_m", ps_m.sum() / weight)
+        print("qs_m", (1 - alpha_s) / (1 - alpha_t))
+
         print("L_vb", L_vb.sum() / (xt == self.mask_index).sum())
 
         return self.T * L_vb
+
+    def _offset_mask_logits(self, logits, del_rate):
+        # we want to add a bias to the logit for the mask token
+        # since its target tends to be much larger than the other tokens
+        # see ipad notes on how this offset is computed
+        offset = torch.log(del_rate * (self.vocab_size - 1)) - torch.log(1 - del_rate)
+        offset = offset.to(self.device)
+        logits[:, :, self.mask_index] += offset
+
+        # renormalize the logits
+        logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+        return logits
 
     def _indel_loss(self, model_output, xt, x0, t):
         dt = 1 / self.T
@@ -468,7 +494,7 @@ class Diffusion(L.LightningModule):
         alpha_t = 1 - t  # + torch.zeros_like(xt)
         alpha_s = 1 - (t - dt)  # + torch.zeros_like(xt)
 
-        del_rate = (alpha_s - alpha_t) / (1 - alpha_t)
+        del_rate = (1 - alpha_s) / (1 - alpha_t)
 
         # this should be shape (batch, xt_len+1, vocab_size)
         # since we can't insert before bos and after eos,
@@ -483,6 +509,7 @@ class Diffusion(L.LightningModule):
         )
         target_probs = target_probs[:, 1:-1]
         target_probs = torch.from_numpy(target_probs).to(self.device)
+
         loss_mask = loss_mask[:, 1:]
         loss_mask = torch.from_numpy(loss_mask).to(self.device)
 
@@ -493,7 +520,14 @@ class Diffusion(L.LightningModule):
         ins_logits = model_output[:, 1::2]
         # print("ins_logits", ins_logits.min(), ins_logits.max(), ins_logits.mean())
         # print(target_probs.shape, ins_logits.shape, loss_mask.shape)
-        L_vb = (-target_probs * ins_logits * loss_mask.unsqueeze(-1)).sum(dim=-1)
+
+        ins_logits = self._offset_mask_logits(ins_logits, del_rate)
+
+        L_vb = (
+            target_probs
+            * ((target_probs + 1e-7).log() - ins_logits)
+            * loss_mask.unsqueeze(-1)
+        ).sum(dim=-1)
         print("L_vb", L_vb.sum() / loss_mask.sum())
 
         # print("L_vb", L_vb.mean())
@@ -803,6 +837,8 @@ class Diffusion(L.LightningModule):
                 return x
 
             model_output = self.forward(x, unet_conditioning)
+            del_rate = (t - dt) / t
+            model_output = self._offset_mask_logits(model_output, del_rate)
 
             # print("time", t)
             # print("avg mask prob", model_output[:, :, self.mask_index].exp().mean())
@@ -887,6 +923,7 @@ class Diffusion(L.LightningModule):
             else:
                 unet_conditioning = self.noise(t)[0]
                 logits = self.forward(x, unet_conditioning)
+                logits = self._offset_mask_logits(logits, (t - dt) / t)
                 _x = _sample_categorical(logits.exp())
                 _xnp = remove_masked_tokens(
                     _x.cpu().numpy(), self.mask_index, self.tokenizer.pad_token_id
