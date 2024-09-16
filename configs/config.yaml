@@ -10,15 +10,15 @@ defaults:
 mode: train  # train / ppl_eval / sample_eval
 diffusion: absorbing_state
 backbone: dit  # dit / dimamba / ar
-parameterization: subs  # subs / d3pm / sedd
+parameterization: indel  # subs / d3pm / sedd / indel
 time_conditioning: False
-T: 0  # 0 (continuous time) / 1000 
+T: 1000  # 0 (continuous time) / 1000 
 subs_masking: False
 
 seed: 1
 
 loader:
-  global_batch_size: 512
+  global_batch_size: 256
   eval_global_batch_size: ${.global_batch_size}
   # Note: batch_size and eval_batch_size are **per machine**
   batch_size: ${div_up:${.global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
@@ -27,7 +27,7 @@ loader:
   pin_memory: True
 
 sampling:
-  predictor: ddpm_cache  # analytic, ddpm, ddpm_cache
+  predictor: ddpm  # analytic, ddpm, ddpm_cache
   steps: 128
   noise_removal: True
   # TODO(yair): @subham, why aren't these params under `eval`?
@@ -73,7 +73,7 @@ trainer:
   log_every_n_steps: 10
   limit_train_batches: 1.0   # train on full dataset, can be used to toggle quick run
   limit_val_batches: 1.0     # validate on full dataset, can be used to toggle quick run
-  val_check_interval: 10000
+  val_check_interval: 1000
 
 wandb:
   project: text-diffusion
@@ -89,13 +89,13 @@ wandb:
 
 hydra:
   run:
-    dir: ./outputs/${data.train}/${now:%Y.%m.%d}/${now:%H%M%S}
+    dir: /data/user_data/awhe/outputs/${data.train}/${now:%Y.%m.%d}/${now:%H%M%S}
   job:
     chdir: true
 
 checkpointing:
   # Use custom `save_dir` if, e.g., saving to S3 bucket, otherwise leave this parameter as is
-  save_dir: ${cwd:}
+  save_dir: /data/user_data/awhe/
   # Note: `checkpoints` path should correspond to `checkpoint_every_n_steps.dirpath`
-  resume_from_ckpt: true
+  resume_from_ckpt: false
   resume_ckpt_path: ${.save_dir}/checkpoints/last.ckpt
